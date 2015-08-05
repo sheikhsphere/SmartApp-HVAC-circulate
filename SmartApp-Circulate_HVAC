@@ -13,42 +13,47 @@
  *  for the specific language governing permissions and limitations under the License.
  *
  */
-definition(
-    name: "Run circulate in HVAC",
-    namespace: "midyear66",
-    author: "Bob Sanford",
-    description: "Run circulate every X minutes if AC or heat has not been on",
-    category: "Green Living",
-    iconUrl: "https://s3.amazonaws.com/smartapp-icons/Convenience/Cat-Convenience.png",
-    iconX2Url: "https://s3.amazonaws.com/smartapp-icons/Convenience/Cat-Convenience%402x.png")
-
-
 preferences {
-	section("Title") {
-		paragraph "Run circulate in HVAC"
-	}
-	section("About") {
-        	paragraph "Run circulate every X minutes if AC or heat has not been on"
-            paragraph "Additional setpoint can be used to determine minimum run temperature."
-        	paragraph "Version 1.1\nCopyright (c) 2014 ssetco.com"
-    	}
-    	section("Thermostat") {
-        	input "thermostat", "capability.thermostat", title:"Select thermostat to be controlled"
-        	input "interval", "number", title:"Set time between circulation cycles (in minutes)", defaultValue:30
-        	input "length", "number", title:"Set of length of circulation cycle (in minutes)", defaultValue:5
-		}
-        section("Choose a temperature sensor... "){
-		input "sensor", "capability.temperatureMeasurement", title: "Temperature Sensor used to establish minimum run temperature"
-		}
-	section("Operation") {
-		input "runTemp", "number", title:"Choose a temperature to set the minimum run temperature.", defaultValue:70
-		
+    page (name: "configApp")
+}
+
+def configApp() {
+    dynamicPage(name: "configApp", install: true, uninstall: true) {
+        section("Title") {
+            paragraph "Run circulate in HVAC"
         }
+        section("About") {
+            paragraph "Run circulate every X minutes if AC or heat has not been on"
+            paragraph "Additional setpoint can be used to determine minimum run temperature."
+            paragraph "Version 1.1\nCopyright (c) 2014 ssetco.com"
+        }
+        section("Thermostat") {
+            input "thermostat", "capability.thermostat", title:"Select thermostat to be controlled"
+            input "interval", "number", title:"Set time between circulation cycles (in minutes)", defaultValue:30
+            input "length", "number", title:"Set of length of circulation cycle (in minutes)", defaultValue:5
+        }
+        section("Choose a temperature sensor... "){
+            input "tempSensors", "capability.temperatureMeasurement", title: "Temperature Sensor used to establish minimum run temperature", multiple: true, required: false
+        }
+        section("Choose a humidity sensor... "){
+            input "rhSensors", "capability.relativeHumidityMeasurement", title: "Humidity Sensor used to establish minimum run humidity", multiple: true, required: false
+        }
+        section("Operation") {
+            input "runHighTemp", "number", title:"Choose a temperature to set the minimum run high temperature.", defaultValue:80
+            input "runHighRH", "number", title:"Choose a humidty to set the minimum run high humidity.", defaultValue:60
+            input "delay", "number", title: "Polling delay (minutes):", required: true, defaultValue: 30
+        }
+        section (title: "More Options", hidden: ((modes) ? false : true), hideable: true) {
+            label title: "Assign a name", required: false
+            input "modes", "mode", title: "Only when mode is", multiple: true, required: false
+            mode title: "Set for specific mode(s)", required: false
+        }
+	}
 }
 
 def installed() {
 	DEBUG("Installed with settings: ${settings}")
-    	initialize()
+    initialize()
 }
 
 def updated() {
@@ -59,45 +64,137 @@ def updated() {
 
 }
 
+private getModeOk() {
+    def result = !modes || modes.contains(location.mode)
+    //DEBUG("getModeOk=$result");
+    result
+}
+
+def scheduleChecks() {
+	def min = Math.round(Math.floor(Math.random() * 60))
+    def exp = "$min */${delay} * * * ?"
+    //def exp = "*/5 * * * * ?"
+    DEBUG ("$exp")
+    schedule(exp, statusCheck)
+    state.hasRandomSchedule = true
+}
+
+def statusCheck() {
+	if (getModeOk()) {
+        //thermostat?.configure()
+        thermostat?.refresh()
+        DEBUG ("statusCheck running_state: ${thermostat.currentValue("thermostatOperatingState")} fan_mode: ${thermostat.currentValue("thermostatFanMode")}")
+        if (state.schedulerEnabled == false && thermostat.currentValue("thermostatOperatingState") == "idle")
+        {
+            LOG("statusCheck idle - running scheduler()")
+            scheduler()
+        }
+        if (state.recirculate)
+        {
+            if (thermostat.currentValue("thermostatFanMode") == "fanAuto")
+                thermostat.fanOn()
+        }
+        else
+        {
+            if (thermostat.currentValue("thermostatFanMode") == "fanOn")
+                thermostat.fanAuto()
+        }
+    }
+}
+
 def scheduler(){
-	DEBUG ("scheduler()")
-    	thermostat.fanAuto()
-	def interval = settings.interval.toInteger() * 60
-	def length = settings.length.toInteger() * 60
-	DEBUG("Interval in seconds: ${interval}, Length in seconds: ${length}")
-	runIn(interval, start_circulate)
-	runIn(interval+length, scheduler)
+	if (getModeOk()) {
+        DEBUG ("scheduler()")
+        state.schedulerEnabled = true
+        state.recirculate = false
+        if (thermostat.currentValue("thermostatFanMode") == "fanOn")
+        {
+            thermostat.fanAuto()
+        }
+        def interval = settings.interval.toInteger() * 60
+        def length = settings.length.toInteger() * 60
+        DEBUG("Interval in seconds: ${interval}, Length in seconds: ${length}")
+        runIn(interval, start_circulate)
+        runIn(interval+length, scheduler)
+    }
 }
         
 def start_circulate(){
-	DEBUG("start_circulate()")
-	if (sensor.currentValue("temperature") >= runtemp)
-	{	DEBUG ("into start_circulate() if statement")
-		thermostat.fanOn()
-   	}
+	if (getModeOk()) {
+        DEBUG("start_circulate()")
+        def maxTemp = 0
+        def maxRH = 0
+        for ( def i = 0; i < tempSensors?.size(); i++) {
+            maxTemp = Math.max(tempSensors[i].currentValue("temperature").toInteger(),maxTemp)
+            DEBUG ("total temp=${tempSensors?.size()}, i=$i, maxTemp=${maxTemp}")
+        } 
+        for ( def i = 0; i < rhSensors?.size(); i++) {
+            maxRH = Math.max(rhSensors[i].currentValue("humidity").toInteger(),maxRH)
+            DEBUG ("total rh=${rhSensors?.size()}, i=$i, maxRH=${maxRH}")
+        } 
+
+        DEBUG ("maxTemp=${maxTemp}, maxRH=${maxRH}")
+        if (maxTemp >= runHighTemp)
+        {	DEBUG ("into start_circulate() if statement for temperature")
+            if (thermostat.currentValue("thermostatFanMode") == "fanAuto")
+            {
+                thermostat.fanOn()
+                state.recirculate = true
+            }
+        }
+        else if (maxRH >= runHighRH)
+        {	DEBUG ("into start_circulate() if statement for humidity")
+            if (thermostat.currentValue("thermostatFanMode") == "fanAuto")
+            {
+                thermostat.fanOn()
+                state.recirculate = true
+            }
+        }
+    }
 }
 
 def initialize() {
+	state.schedulerEnabled = false
+    state.recirculate = false
 	DEBUG("initialize()")
-	subscribe(device, "thermostatOperatingState", eventHandler)
-    	DEBUG ("running_state: ${thermostat.currentValue("thermostatOperatingState")}")
+    subscribe(location, "mode", eventHandler)
+	subscribe(thermostat, "thermostatOperatingState", eventHandler)
+    DEBUG ("running_state: ${thermostat.currentValue("thermostatOperatingState")}")
 	if(thermostat.currentValue("thermostatOperatingState") == "idle"){
 		scheduler()
     }
+    scheduleChecks()
 }
     
-// TODO: implement event handlers
-
 def eventHandler(evt){
 	DEBUG("eventHandler: ${evt.value}: ${evt}, ${settings}")
-	if(evt.value == "idle"){
-    	LOG("idle - running scheduler()")
-		scheduler()
-	}
-	if(evt.value == "heating"|| evt.value == "cooling"){
-		LOG("not idle - running unschedule()")
-    		unschedule()
-    		thermostat.fanAuto()
+    if (!modes || modes.contains(evt.value)) {
+    	//send("mode change to ok mode")
+   		initialize()
+		//evaluate()
+    }
+    if (!(!modes || modes.contains(evt.value))) {
+    	send("mode change to not ok mode")
+        unsubscribe()
+		unschedule()
+        subscribe(location, changedLocationMode)
+    }
+    if (getModeOk()) {
+        if(evt.value == "idle" || thermostat.currentValue("thermostatOperatingState") == "idle"){
+            LOG("idle - running scheduler()")
+            scheduler()
+        }
+        else if(evt.value == "heating"|| evt.value == "cooling" || thermostat.currentValue("thermostatOperatingState") == "heating" || thermostat.currentValue("thermostatOperatingState") == "cooling"){
+            LOG("not idle - running unschedule()")
+            state.schedulerEnabled = false
+            unschedule()
+            scheduleChecks()
+            if (thermostat.currentValue("thermostatFanMode") == "fanOn")
+            {
+                thermostat.fanAuto()
+                state.recirculate = false
+            }
+       }
    }
 }
 
@@ -106,5 +203,5 @@ private def LOG(message){
 }
 
 private def DEBUG(message){
-	//log.debug message
+	log.debug message
 }
