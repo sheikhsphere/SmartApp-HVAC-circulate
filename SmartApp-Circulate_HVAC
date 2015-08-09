@@ -13,6 +13,15 @@
  *  for the specific language governing permissions and limitations under the License.
  *
  */
+definition(
+    name: "Run circulate in HVAC",
+    namespace: "midyear66",
+    author: "Bob Sanford",
+    description: "Run circulate every X minutes if AC or heat has not been on",
+    category: "Green Living",
+    iconUrl: "https://s3.amazonaws.com/smartapp-icons/Convenience/Cat-Convenience.png",
+    iconX2Url: "https://s3.amazonaws.com/smartapp-icons/Convenience/Cat-Convenience%402x.png")
+
 preferences {
     page (name: "configApp")
 }
@@ -61,7 +70,26 @@ def updated() {
 	unsubscribe()
 	unschedule()
    	initialize()
+	scheduleChecks()
+}
 
+def initialize() {
+	state.schedulerEnabled = false
+    state.recirculate = false
+    subscribe(location, "mode", eventHandler)
+	subscribe(thermostat, "thermostatOperatingState", eventHandler)
+    LOG("initialize:: running_state=[${thermostat.currentValue("thermostatOperatingState")}] fan_mode=[${thermostat.currentValue("thermostatFanMode")}] state.schedulerEnabled=[${state.schedulerEnabled}] state.recirculate=[${state.recirculate}]")
+	if (getModeOk() && thermostat.currentValue("thermostatOperatingState") == "idle")
+    {
+    	DEBUG("initialize:: idle - running scheduler()")
+        state.schedulerEnabled = true
+		scheduler()
+    }
+    if (getModeOk() && thermostat.currentValue("thermostatFanMode") == "fanOn")
+    {
+    	DEBUG("initialize:: Set fanAuto()")
+        thermostat.fanAuto()
+    }
 }
 
 private getModeOk() {
@@ -73,128 +101,126 @@ private getModeOk() {
 def scheduleChecks() {
 	def min = Math.round(Math.floor(Math.random() * 60))
     def exp = "$min */${delay} * * * ?"
-    //def exp = "*/5 * * * * ?"
-    DEBUG ("$exp")
+    //DEBUG ("$exp")
     schedule(exp, statusCheck)
     state.hasRandomSchedule = true
 }
 
 def statusCheck() {
-	if (getModeOk()) {
-        //thermostat?.configure()
-        thermostat?.refresh()
-        DEBUG ("statusCheck running_state: ${thermostat.currentValue("thermostatOperatingState")} fan_mode: ${thermostat.currentValue("thermostatFanMode")}")
+	if (getModeOk()) 
+    {
+        try
+        {
+        	thermostat?.refresh()
+            //thermostat?.configure()
+        }
+        catch (all) 
+        {
+        	WARN("statusCheck:: refresh not supported for thermosatat")
+        }
+        
+        LOG("statusCheck:: running_state=[${thermostat.currentValue("thermostatOperatingState")}] fan_mode=[${thermostat.currentValue("thermostatFanMode")}] state.schedulerEnabled=[${state.schedulerEnabled}] state.recirculate=[${state.recirculate}]")
         if (state.schedulerEnabled == false && thermostat.currentValue("thermostatOperatingState") == "idle")
         {
-            LOG("statusCheck idle - running scheduler()")
+            DEBUG("statusCheck:: idle and scheduler not enabled - running scheduler()")
+            state.schedulerEnabled = true
             scheduler()
         }
-        if (state.recirculate)
+        else if (state.recirculate)
         {
             if (thermostat.currentValue("thermostatFanMode") == "fanAuto")
+            {
+            	DEBUG("statusCheck:: Set fanOn()")
                 thermostat.fanOn()
+            }
         }
         else
         {
             if (thermostat.currentValue("thermostatFanMode") == "fanOn")
+            {
+            	DEBUG("statusCheck:: Set fanAuto()")
                 thermostat.fanAuto()
+            }
         }
     }
 }
 
 def scheduler(){
-	if (getModeOk()) {
-        DEBUG ("scheduler()")
-        state.schedulerEnabled = true
+	if (getModeOk() && state.schedulerEnabled == true) 
+    {
         state.recirculate = false
         if (thermostat.currentValue("thermostatFanMode") == "fanOn")
         {
+        	DEBUG("scheduler:: Set fanAuto()")
             thermostat.fanAuto()
         }
         def interval = settings.interval.toInteger() * 60
         def length = settings.length.toInteger() * 60
-        DEBUG("Interval in seconds: ${interval}, Length in seconds: ${length}")
+        LOG("scheduler:: Wating ${interval} seconds to turn fan on and ${length} seconds after that to turn it back off.")
         runIn(interval, start_circulate)
         runIn(interval+length, scheduler)
     }
 }
         
 def start_circulate(){
-	if (getModeOk()) {
-        DEBUG("start_circulate()")
+	if (getModeOk() && state.schedulerEnabled == true)
+    {
         def maxTemp = 0
         def maxRH = 0
-        for ( def i = 0; i < tempSensors?.size(); i++) {
+        for ( def i = 0; i < tempSensors?.size(); i++) 
+        {
             maxTemp = Math.max(tempSensors[i].currentValue("temperature").toInteger(),maxTemp)
-            DEBUG ("total temp=${tempSensors?.size()}, i=$i, maxTemp=${maxTemp}")
+            DEBUG ("start_circulate:: total temp=${tempSensors?.size()}, i=$i, maxTemp=${maxTemp}")
         } 
-        for ( def i = 0; i < rhSensors?.size(); i++) {
+        for ( def i = 0; i < rhSensors?.size(); i++) 
+        {
             maxRH = Math.max(rhSensors[i].currentValue("humidity").toInteger(),maxRH)
-            DEBUG ("total rh=${rhSensors?.size()}, i=$i, maxRH=${maxRH}")
+            DEBUG ("start_circulate:: total rh=${rhSensors?.size()}, i=$i, maxRH=${maxRH}")
         } 
 
         DEBUG ("maxTemp=${maxTemp}, maxRH=${maxRH}")
         if (maxTemp >= runHighTemp)
-        {	DEBUG ("into start_circulate() if statement for temperature")
+        {
             if (thermostat.currentValue("thermostatFanMode") == "fanAuto")
             {
+        		DEBUG("start_circulate:: Set fanOn() because of temperature")
                 thermostat.fanOn()
                 state.recirculate = true
             }
         }
         else if (maxRH >= runHighRH)
-        {	DEBUG ("into start_circulate() if statement for humidity")
+        {
             if (thermostat.currentValue("thermostatFanMode") == "fanAuto")
             {
+        		DEBUG("start_circulate:: Set fanOn() because of humidity")
                 thermostat.fanOn()
                 state.recirculate = true
             }
         }
     }
 }
-
-def initialize() {
-	state.schedulerEnabled = false
-    state.recirculate = false
-	DEBUG("initialize()")
-    subscribe(location, "mode", eventHandler)
-	subscribe(thermostat, "thermostatOperatingState", eventHandler)
-    DEBUG ("running_state: ${thermostat.currentValue("thermostatOperatingState")}")
-	if(thermostat.currentValue("thermostatOperatingState") == "idle"){
-		scheduler()
-    }
-    scheduleChecks()
-}
-    
+   
 def eventHandler(evt){
-	DEBUG("eventHandler: ${evt.value}: ${evt}, ${settings}")
-    if (!modes || modes.contains(evt.value)) {
-    	//send("mode change to ok mode")
-   		initialize()
-		//evaluate()
-    }
-    if (!(!modes || modes.contains(evt.value))) {
-    	send("mode change to not ok mode")
-        unsubscribe()
-		unschedule()
-        subscribe(location, changedLocationMode)
-    }
-    if (getModeOk()) {
-        if(evt.value == "idle" || thermostat.currentValue("thermostatOperatingState") == "idle"){
-            LOG("idle - running scheduler()")
-            scheduler()
+	LOG("eventHandler:: ${evt.name} changed to [${evt.value}]")
+    if (evt.name == "mode")
+    {
+        if (!modes || modes.contains(evt.value)) 
+        {
+            DEBUG("eventHandler:: ${evt.name} change to ok mode [${evt.value}] - running initialize()]")
+            initialize()
         }
-        else if(evt.value == "heating"|| evt.value == "cooling" || thermostat.currentValue("thermostatOperatingState") == "heating" || thermostat.currentValue("thermostatOperatingState") == "cooling"){
-            LOG("not idle - running unschedule()")
-            state.schedulerEnabled = false
+        else if (!(!modes || modes.contains(evt.value))) 
+        {
+            WARN("eventHandler:: ${evt.name} change to not ok mode [${evt.value}]")
+            unsubscribe()
             unschedule()
-            scheduleChecks()
-            if (thermostat.currentValue("thermostatFanMode") == "fanOn")
-            {
-                thermostat.fanAuto()
-                state.recirculate = false
-            }
-       }
+            subscribe(location, changedLocationMode)
+        }
+    }
+    else if (getModeOk() && evt.name == "thermostatOperatingState") 
+    {
+        DEBUG("eventHandler:: ${evt.name} changed to [${evt.value}] - running initialize()")
+        initialize()
    }
 }
 
@@ -204,4 +230,8 @@ private def LOG(message){
 
 private def DEBUG(message){
 	log.debug message
+}
+
+private def WARN(message){
+	log.warn message
 }
